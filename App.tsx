@@ -2,7 +2,7 @@ import React, { useState, useMemo, useRef } from 'react';
 import { FileUpload } from './components/FileUpload';
 import { extractBillData } from './services/geminiService';
 import { BillData, NewOfferData, AnalysisStatus, ComparisonResult, SavedSimulation } from './types';
-import { Zap, Activity, FileText, AlertTriangle, ArrowRight, TrendingDown, TrendingUp, Info, Calculator, Edit3, ChevronDown, ChevronUp, Scale, Store, Save, RotateCcw } from 'lucide-react';
+import { Zap, Activity, FileText, AlertTriangle, ArrowRight, TrendingDown, TrendingUp, Info, Calculator, Edit3, ChevronDown, ChevronUp, Scale, Store, Save, RotateCcw, Plus, Trophy, Trash2, Eye } from 'lucide-react';
 
 // Funções para gerar estado inicial limpo (Factory Pattern)
 // Usar funções garante que recebemos sempre um novo objeto, evitando referências partilhadas/mutadas
@@ -31,16 +31,21 @@ const App: React.FC = () => {
   const [isTaxesExpanded, setIsTaxesExpanded] = useState<boolean>(false);
   const [uploadKey, setUploadKey] = useState<number>(0);
   const formRef = useRef<HTMLDivElement>(null);
+  const multiCompRef = useRef<HTMLDivElement>(null);
 
   // Inicializar estado usando as funções
   const [billData, setBillData] = useState<BillData>(getInitialBillData());
   const [newOffer, setNewOffer] = useState<NewOfferData>(getInitialOfferData());
+  
+  // State for multi-simulation comparison
+  const [multiSimulations, setMultiSimulations] = useState<SavedSimulation[]>([]);
 
   const handleReset = () => {
     if (window.confirm("Tem a certeza que pretende limpar todos os dados e iniciar uma nova simulação?")) {
       // Reiniciar com novos objetos limpos
       setBillData(getInitialBillData());
       setNewOffer(getInitialOfferData());
+      setMultiSimulations([]);
       setStatus(AnalysisStatus.IDLE);
       setErrorMsg(null);
       setIsTaxesExpanded(false);
@@ -97,6 +102,54 @@ const App: React.FC = () => {
 
   const scrollToForm = () => {
     formRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  // --- MULTI SIMULATION HANDLERS ---
+  const handleAddMultiSimulations = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      const files: File[] = Array.from(e.target.files);
+      const newSims: SavedSimulation[] = [];
+      let processedCount = 0;
+
+      files.forEach(file => {
+        const reader = new FileReader();
+        reader.onload = (event) => {
+          try {
+            if (event.target?.result) {
+              const json = JSON.parse(event.target.result as string) as SavedSimulation;
+              if (json.newOffer) {
+                if (!json.timestamp) json.timestamp = new Date().toISOString();
+                newSims.push(json);
+              }
+            }
+          } catch (err) {
+            console.error("Error parsing multi-sim file", file.name, err);
+          } finally {
+            processedCount++;
+            if (processedCount === files.length) {
+              setMultiSimulations(prev => [...prev, ...newSims]);
+              if (multiCompRef.current) {
+                setTimeout(() => multiCompRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
+              }
+            }
+          }
+        };
+        reader.readAsText(file);
+      });
+    }
+    // Reset input
+    e.target.value = '';
+  };
+
+  const removeMultiSimulation = (index: number) => {
+    setMultiSimulations(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const loadSimulationToMain = (sim: SavedSimulation) => {
+    setNewOffer(sim.newOffer);
+    if (formRef.current) {
+      formRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
   };
 
   // --- VAT CALCULATION LOGIC ---
@@ -216,6 +269,43 @@ const App: React.FC = () => {
       }
     };
   }, [billData, newOffer, currentCalculated]);
+
+  // Multi Comparisons Calculation
+  const multiComparisonResults = useMemo(() => {
+    if (billData.monthlyConsumptionKwh === 0 || multiSimulations.length === 0) return [];
+
+    const taxes = {
+      cav: billData.audiovisualTax,
+      dgeg: billData.dgegTax,
+      iec: billData.ieceTax,
+      social: billData.socialTariff
+    };
+
+    const results = multiSimulations.map((sim, index) => {
+      const calc = calculateWithVat(
+        billData.monthlyConsumptionKwh,
+        billData.contractedPowerKva,
+        billData.billingPeriodDays,
+        sim.newOffer.powerPricePerDay,
+        sim.newOffer.energyPricePerKwh,
+        taxes
+      );
+      
+      const diff = currentCalculated.total - calc.total;
+      const yearlySavings = diff * (365 / billData.billingPeriodDays);
+
+      return {
+        ...sim,
+        originalIndex: index,
+        calculatedTotal: calc.total,
+        yearlySavings,
+        isCheaper: calc.total < currentCalculated.total
+      };
+    });
+
+    // Sort by Total Cost (Ascending - Cheapest first)
+    return results.sort((a, b) => a.calculatedTotal - b.calculatedTotal);
+  }, [billData, multiSimulations, currentCalculated]);
 
   const handleBillChange = (field: keyof BillData, value: string) => {
     const numValue = parseFloat(value) || 0;
@@ -813,6 +903,119 @@ Gerado automaticamente por Comparar Energia
                </button>
             </div>
 
+          </div>
+        )}
+
+        {/* --- MULTI COMPARISON SECTION --- */}
+        {comparison && (
+          <div ref={multiCompRef} className="bg-white rounded-2xl shadow-sm border border-indigo-100 overflow-hidden mb-10 animate-fade-in">
+            <div className="bg-indigo-50 px-6 py-4 border-b border-indigo-100 flex justify-between items-center">
+              <h3 className="font-bold text-indigo-800 text-lg flex items-center">
+                <Trophy className="w-5 h-5 mr-2" />
+                Comparador de Cenários Guardados
+              </h3>
+              
+              <div className="relative">
+                <input 
+                  type="file" 
+                  id="multi-sim-upload" 
+                  multiple 
+                  accept=".json" 
+                  className="hidden" 
+                  onChange={handleAddMultiSimulations}
+                />
+                <label 
+                  htmlFor="multi-sim-upload" 
+                  className="flex items-center px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-medium cursor-pointer transition-colors shadow-sm"
+                >
+                  <Plus className="w-4 h-4 mr-1.5" />
+                  Adicionar Comparativos
+                </label>
+              </div>
+            </div>
+
+            <div className="p-6">
+              {multiSimulations.length === 0 ? (
+                <div className="text-center py-8 bg-slate-50 rounded-xl border border-dashed border-slate-300">
+                   <p className="text-slate-500 mb-2">Ainda não adicionou cenários para comparar.</p>
+                   <p className="text-xs text-slate-400 max-w-md mx-auto">
+                     Carregue múltiplos ficheiros ".json" (gerados pelo botão "Guardar Comparativo") para ver qual é o fornecedor mais barato para o seu consumo atual.
+                   </p>
+                </div>
+              ) : (
+                <>
+                  <div className="mb-4 flex items-center bg-blue-50 p-3 rounded-lg border border-blue-100">
+                     <Info className="w-4 h-4 text-blue-500 mr-2 flex-shrink-0" />
+                     <p className="text-xs text-blue-800">
+                       A tabela abaixo aplica os tarifários dos cenários importados ao seu <strong>consumo atual</strong> ({billData.monthlyConsumptionKwh} kWh). 
+                       Isto garante uma comparação justa entre todos os fornecedores.
+                     </p>
+                  </div>
+
+                  <div className="overflow-x-auto rounded-xl border border-slate-200">
+                    <table className="w-full text-sm">
+                      <thead className="bg-slate-50 border-b border-slate-200">
+                        <tr>
+                          <th className="px-4 py-3 text-left font-semibold text-slate-500 w-12">Rank</th>
+                          <th className="px-4 py-3 text-left font-semibold text-slate-500">Fornecedor</th>
+                          <th className="px-4 py-3 text-right font-semibold text-slate-500">Energia</th>
+                          <th className="px-4 py-3 text-right font-semibold text-slate-500">Potência</th>
+                          <th className="px-4 py-3 text-right font-semibold text-slate-500">Total Mensal</th>
+                          <th className="px-4 py-3 text-right font-semibold text-slate-500">Poupança Anual Est.</th>
+                          <th className="px-4 py-3 text-center font-semibold text-slate-500 w-24">Ações</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {multiComparisonResults.map((sim, idx) => (
+                          <tr key={idx} className={`hover:bg-slate-50 transition-colors ${idx === 0 ? 'bg-emerald-50/30' : ''}`}>
+                            <td className="px-4 py-3">
+                              {idx === 0 ? (
+                                <Trophy className="w-5 h-5 text-yellow-500" />
+                              ) : (
+                                <span className="text-slate-400 font-medium ml-1">#{idx + 1}</span>
+                              )}
+                            </td>
+                            <td className="px-4 py-3 font-medium text-slate-800">
+                              {sim.newOffer.supplierName || 'Desconhecido'}
+                            </td>
+                            <td className="px-4 py-3 text-right text-slate-600">
+                              {sim.newOffer.energyPricePerKwh} €
+                            </td>
+                            <td className="px-4 py-3 text-right text-slate-600">
+                              {sim.newOffer.powerPricePerDay} €
+                            </td>
+                            <td className="px-4 py-3 text-right font-bold text-slate-800">
+                              {fmt(sim.calculatedTotal)} €
+                            </td>
+                            <td className={`px-4 py-3 text-right font-medium ${sim.yearlySavings > 0 ? 'text-emerald-600' : 'text-orange-600'}`}>
+                              {sim.yearlySavings > 0 ? '+' : ''}{fmt(sim.yearlySavings)} €
+                            </td>
+                            <td className="px-4 py-3">
+                               <div className="flex items-center justify-center space-x-2">
+                                  <button 
+                                    onClick={() => loadSimulationToMain(sim)}
+                                    className="p-1.5 text-blue-600 hover:bg-blue-50 rounded transition-colors"
+                                    title="Ver Detalhes na Vista Principal"
+                                  >
+                                    <Eye className="w-4 h-4" />
+                                  </button>
+                                  <button 
+                                    onClick={() => removeMultiSimulation(sim.originalIndex)}
+                                    className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors"
+                                    title="Remover"
+                                  >
+                                    <Trash2 className="w-4 h-4" />
+                                  </button>
+                               </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+            </div>
           </div>
         )}
 
