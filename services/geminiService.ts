@@ -1,9 +1,11 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { BillData } from "../types";
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-
 export const extractBillData = async (fileBase64: string, mimeType: string): Promise<BillData> => {
+  // Initialize explicitly inside the function to prevent app crash on load if env is missing
+  // This allows the UI to render and show a graceful error later if the key is invalid.
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+
   try {
     const prompt = `
       Analise esta fatura de eletricidade portuguesa. Extraia os seguintes dados com precisão para formato JSON:
