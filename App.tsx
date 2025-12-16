@@ -1,11 +1,12 @@
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { FileUpload } from './components/FileUpload';
 import { extractBillData } from './services/geminiService';
 import { BillData, NewOfferData, AnalysisStatus, ComparisonResult, SavedSimulation } from './types';
 import { Zap, Activity, FileText, AlertTriangle, ArrowRight, TrendingDown, TrendingUp, Info, Calculator, Edit3, ChevronDown, ChevronUp, Scale, Store, Save, RotateCcw, Plus, Trophy, Trash2, Eye } from 'lucide-react';
 
+const STORAGE_KEY = 'comparar-energia-local-state-v1';
+
 // Funções para gerar estado inicial limpo (Factory Pattern)
-// Usar funções garante que recebemos sempre um novo objeto, evitando referências partilhadas/mutadas
 const getInitialBillData = (): BillData => ({
   monthlyConsumptionKwh: 0,
   contractedPowerKva: 0,
@@ -26,23 +27,56 @@ const getInitialOfferData = (): NewOfferData => ({
 });
 
 const App: React.FC = () => {
-  const [status, setStatus] = useState<AnalysisStatus>(AnalysisStatus.IDLE);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [isTaxesExpanded, setIsTaxesExpanded] = useState<boolean>(false);
+  // 1. Tentar recuperar estado guardado ao iniciar
+  const savedState = useMemo(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        return JSON.parse(saved);
+      }
+    } catch (e) {
+      console.error("Erro ao ler localStorage", e);
+    }
+    return null;
+  }, []);
+
+  // 2. Inicializar estados com dados guardados ou defaults
+  // Se o estado guardado estava "ANALYZING", revertemos para "IDLE" para evitar loading eterno
+  const initialStatus = savedState?.status === AnalysisStatus.ANALYZING 
+    ? AnalysisStatus.IDLE 
+    : (savedState?.status || AnalysisStatus.IDLE);
+
+  const [status, setStatus] = useState<AnalysisStatus>(initialStatus);
+  const [errorMsg, setErrorMsg] = useState<string | null>(savedState?.errorMsg || null);
+  const [isTaxesExpanded, setIsTaxesExpanded] = useState<boolean>(savedState?.isTaxesExpanded || false);
   const [uploadKey, setUploadKey] = useState<number>(0);
   const formRef = useRef<HTMLDivElement>(null);
   const multiCompRef = useRef<HTMLDivElement>(null);
 
-  // Inicializar estado usando as funções
-  const [billData, setBillData] = useState<BillData>(getInitialBillData());
-  const [newOffer, setNewOffer] = useState<NewOfferData>(getInitialOfferData());
+  const [billData, setBillData] = useState<BillData>(savedState?.billData || getInitialBillData());
+  const [newOffer, setNewOffer] = useState<NewOfferData>(savedState?.newOffer || getInitialOfferData());
   
-  // State for multi-simulation comparison
-  const [multiSimulations, setMultiSimulations] = useState<SavedSimulation[]>([]);
+  // Opcional: Persistir também as simulações comparativas se desejar. Aqui assumimos que sim.
+  const [multiSimulations, setMultiSimulations] = useState<SavedSimulation[]>(savedState?.multiSimulations || []);
+
+  // 3. Efeito para salvar automaticamente sempre que algo muda
+  useEffect(() => {
+    const stateToSave = {
+      billData,
+      newOffer,
+      multiSimulations,
+      status,
+      errorMsg,
+      isTaxesExpanded
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(stateToSave));
+  }, [billData, newOffer, multiSimulations, status, errorMsg, isTaxesExpanded]);
 
   const handleReset = () => {
     if (window.confirm("Tem a certeza que pretende limpar todos os dados e iniciar uma nova simulação?")) {
-      // Reiniciar com novos objetos limpos
+      // 4. Limpar localStorage explicitamente
+      localStorage.removeItem(STORAGE_KEY);
+      
       setBillData(getInitialBillData());
       setNewOffer(getInitialOfferData());
       setMultiSimulations([]);
@@ -55,8 +89,7 @@ const App: React.FC = () => {
   };
 
   const handleClearFile = () => {
-    // Limpar apenas os dados da fatura quando o ficheiro é removido
-    // Mantemos a nova proposta caso o utilizador queira testar outra fatura com a mesma proposta
+    // Limpar apenas os dados da fatura. A persistência automática (useEffect) atualizará o localStorage.
     setBillData(getInitialBillData());
     setStatus(AnalysisStatus.IDLE);
     setErrorMsg(null);
@@ -66,11 +99,11 @@ const App: React.FC = () => {
   const handleFileSelect = async (base64: string, mimeType: string) => {
     setStatus(AnalysisStatus.ANALYZING);
     setErrorMsg(null);
-    setIsTaxesExpanded(true); // Auto-expand taxes when data is loaded
+    setIsTaxesExpanded(true); 
     
     try {
       // Check if it is a JSON file (Simulation Import)
-      if (mimeType === 'application/json' || base64.startsWith('ew')) { // 'ew' is base64 for '{'
+      if (mimeType === 'application/json' || base64.startsWith('ew')) { 
         try {
           const jsonString = atob(base64);
           const savedData = JSON.parse(jsonString) as SavedSimulation;
@@ -165,13 +198,11 @@ const App: React.FC = () => {
     const IVA_NORMAL = 0.23;
 
     // 1. Power Cost & VAT
-    // Power <= 6.9 kVA gets 6% VAT, else 23%
     const powerBaseCost = days * powerPrice;
     const powerVatRate = powerKva <= 6.9 ? IVA_LOW : IVA_NORMAL;
     const powerVat = powerBaseCost * powerVatRate;
 
     // 2. Energy Cost & VAT
-    // If Power <= 6.9: First 100kWh at 6%, rest at 23%. Else 23%.
     const energyBaseCost = consumption * energyPrice;
     let energyVat = 0;
 
@@ -189,11 +220,10 @@ const App: React.FC = () => {
     }
 
     // 3. Taxes VAT
-    // CAV is 6%, DGEG/IEC are 23%
     const cavVat = taxes.cav * IVA_LOW;
     const dgegVat = taxes.dgeg * IVA_NORMAL;
     const iecVat = taxes.iec * IVA_NORMAL;
-    const socialVat = 0; // Usually exempt or handled as gross deduction
+    const socialVat = 0; 
 
     const totalBase = powerBaseCost + energyBaseCost + taxes.cav + taxes.dgeg + taxes.iec + taxes.social;
     const totalVat = powerVat + energyVat + cavVat + dgegVat + iecVat + socialVat;
@@ -233,7 +263,6 @@ const App: React.FC = () => {
   }, [billData]);
 
   const comparison: ComparisonResult | null = useMemo(() => {
-    // Only compare if we have consumption data
     if (billData.monthlyConsumptionKwh === 0) return null;
 
     const current = currentCalculated;
@@ -303,7 +332,6 @@ const App: React.FC = () => {
       };
     });
 
-    // Sort by Total Cost (Ascending - Cheapest first)
     return results.sort((a, b) => a.calculatedTotal - b.calculatedTotal);
   }, [billData, multiSimulations, currentCalculated]);
 
@@ -321,7 +349,6 @@ const App: React.FC = () => {
     setNewOffer(prev => ({ ...prev, [field]: numValue }));
   };
 
-  // Helper to format currency - NO SYMBOL
   const fmt = (val: number) => val.toFixed(2);
 
   const handleDownloadReport = () => {
@@ -332,7 +359,6 @@ const App: React.FC = () => {
     const timeStr = now.toLocaleTimeString('pt-PT');
     const supplier = newOffer.supplierName ? newOffer.supplierName.replace(/\s+/g, '_') : 'Nova_Proposta';
     
-    // Create text content
     const content = `
 =========================================
       RELATÓRIO COMPARAR ENERGIA
@@ -377,13 +403,11 @@ Valor: ${fmt(comparison.details.taxes.current)} EUR
 Gerado automaticamente por Comparar Energia
     `;
 
-    // Create blob and download link
     const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
     
-    // Format: Comparativo_Fornecedor_YYYY-MM-DD_HHmm.txt
     const timestamp = now.toISOString().slice(0, 16).replace(/[:T]/g, '_');
     link.download = `Relatorio_${supplier}_${timestamp}.txt`;
     
@@ -409,7 +433,6 @@ Gerado automaticamente por Comparar Energia
     const link = document.createElement('a');
     link.href = url;
     
-    // Naming it Comparativo_X.json as requested for the main save action
     const timestamp = now.toISOString().slice(0, 16).replace(/[:T]/g, '_');
     link.download = `Comparativo_${supplier}_${timestamp}.json`;
     
