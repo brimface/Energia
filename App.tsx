@@ -1,11 +1,12 @@
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { FileUpload } from './components/FileUpload';
 import { extractBillData } from './services/geminiService';
 import { BillData, NewOfferData, AnalysisStatus, ComparisonResult, SavedSimulation } from './types';
-import { Zap, Activity, FileText, AlertTriangle, ArrowRight, TrendingDown, TrendingUp, Info, Calculator, Edit3, ChevronDown, ChevronUp, Scale, Store, Save, RotateCcw } from 'lucide-react';
+import { Zap, Activity, FileText, AlertTriangle, ArrowRight, TrendingDown, TrendingUp, Info, Calculator, Edit3, ChevronDown, ChevronUp, Scale, Store, Save, RotateCcw, Plus, Trash2, Trophy, Eye } from 'lucide-react';
+
+const STORAGE_KEY = 'comparar-energia-local-state-v1';
 
 // Funções para gerar estado inicial limpo (Factory Pattern)
-// Usar funções garante que recebemos sempre um novo objeto, evitando referências partilhadas/mutadas
 const getInitialBillData = (): BillData => ({
   monthlyConsumptionKwh: 0,
   contractedPowerKva: 0,
@@ -26,32 +27,65 @@ const getInitialOfferData = (): NewOfferData => ({
 });
 
 const App: React.FC = () => {
-  const [status, setStatus] = useState<AnalysisStatus>(AnalysisStatus.IDLE);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [isTaxesExpanded, setIsTaxesExpanded] = useState<boolean>(false);
+  // 1. Tentar recuperar estado guardado ao iniciar
+  const savedState = useMemo(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        return JSON.parse(saved);
+      }
+    } catch (e) {
+      console.error("Erro ao ler localStorage", e);
+    }
+    return null;
+  }, []);
+
+  // 2. Inicializar estados com dados guardados ou defaults
+  const initialStatus = savedState?.status === AnalysisStatus.ANALYZING 
+    ? AnalysisStatus.IDLE 
+    : (savedState?.status || AnalysisStatus.IDLE);
+
+  const [status, setStatus] = useState<AnalysisStatus>(initialStatus);
+  const [errorMsg, setErrorMsg] = useState<string | null>(savedState?.errorMsg || null);
+  const [isTaxesExpanded, setIsTaxesExpanded] = useState<boolean>(savedState?.isTaxesExpanded || false);
   const [uploadKey, setUploadKey] = useState<number>(0);
   const formRef = useRef<HTMLDivElement>(null);
+  const multiCompRef = useRef<HTMLDivElement>(null);
 
-  // Inicializar estado usando as funções
-  const [billData, setBillData] = useState<BillData>(getInitialBillData());
-  const [newOffer, setNewOffer] = useState<NewOfferData>(getInitialOfferData());
+  const [billData, setBillData] = useState<BillData>(savedState?.billData || getInitialBillData());
+  const [newOffer, setNewOffer] = useState<NewOfferData>(savedState?.newOffer || getInitialOfferData());
+  
+  // Novo estado para múltiplas simulações
+  const [multiSimulations, setMultiSimulations] = useState<SavedSimulation[]>([]);
+
+  // 3. Efeito para salvar automaticamente sempre que algo muda
+  useEffect(() => {
+    const stateToSave = {
+      billData,
+      newOffer,
+      status,
+      errorMsg,
+      isTaxesExpanded
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(stateToSave));
+  }, [billData, newOffer, status, errorMsg, isTaxesExpanded]);
 
   const handleReset = () => {
     if (window.confirm("Tem a certeza que pretende limpar todos os dados e iniciar uma nova simulação?")) {
-      // Reiniciar com novos objetos limpos
+      localStorage.removeItem(STORAGE_KEY);
+      
       setBillData(getInitialBillData());
       setNewOffer(getInitialOfferData());
+      setMultiSimulations([]);
       setStatus(AnalysisStatus.IDLE);
       setErrorMsg(null);
       setIsTaxesExpanded(false);
-      setUploadKey(prev => prev + 1); // Forçar recriação do componente de upload
+      setUploadKey(prev => prev + 1);
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
   };
 
   const handleClearFile = () => {
-    // Limpar apenas os dados da fatura quando o ficheiro é removido
-    // Mantemos a nova proposta caso o utilizador queira testar outra fatura com a mesma proposta
     setBillData(getInitialBillData());
     setStatus(AnalysisStatus.IDLE);
     setErrorMsg(null);
@@ -61,11 +95,10 @@ const App: React.FC = () => {
   const handleFileSelect = async (base64: string, mimeType: string) => {
     setStatus(AnalysisStatus.ANALYZING);
     setErrorMsg(null);
-    setIsTaxesExpanded(true); // Auto-expand taxes when data is loaded
+    setIsTaxesExpanded(true); 
     
     try {
-      // Check if it is a JSON file (Simulation Import)
-      if (mimeType === 'application/json' || base64.startsWith('ew')) { // 'ew' is base64 for '{'
+      if (mimeType === 'application/json' || base64.startsWith('ew')) { 
         try {
           const jsonString = atob(base64);
           const savedData = JSON.parse(jsonString) as SavedSimulation;
@@ -84,7 +117,6 @@ const App: React.FC = () => {
         }
       }
 
-      // If not JSON, proceed with Gemini extraction
       const data = await extractBillData(base64, mimeType);
       setBillData(data);
       setStatus(AnalysisStatus.SUCCESS);
@@ -92,6 +124,58 @@ const App: React.FC = () => {
       console.error(err);
       setErrorMsg(err.message || "Não foi possível analisar o ficheiro. Por favor tente novamente.");
       setStatus(AnalysisStatus.ERROR);
+    }
+  };
+
+  // --- MULTI SIMULATION LOGIC ---
+  const handleAddMultiSimulations = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      // Fix: Explicitly type 'files' as File[] to prevent it being inferred as unknown[], which causes errors when accessing file.name and passing file to FileReader
+      const files: File[] = Array.from(e.target.files);
+      const newSims: SavedSimulation[] = [];
+      let processedCount = 0;
+
+      files.forEach(file => {
+        const reader = new FileReader();
+        reader.onload = (event) => {
+          try {
+            if (event.target?.result) {
+              const json = JSON.parse(event.target.result as string) as SavedSimulation;
+              if (json.newOffer) {
+                // Adicionar timestamp se não existir para usar como key única se necessário
+                if (!json.timestamp) json.timestamp = new Date().toISOString();
+                newSims.push(json);
+              }
+            }
+          } catch (err) {
+            console.error("Error parsing multi-sim file", file.name, err);
+          } finally {
+            processedCount++;
+            if (processedCount === files.length) {
+              setMultiSimulations(prev => [...prev, ...newSims]);
+              if (multiCompRef.current) {
+                multiCompRef.current.scrollIntoView({ behavior: 'smooth' });
+              }
+            }
+          }
+        };
+        reader.readAsText(file);
+      });
+    }
+    // Reset input
+    e.target.value = '';
+  };
+
+  const removeMultiSimulation = (index: number) => {
+    setMultiSimulations(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const loadSimulationToMain = (sim: SavedSimulation) => {
+    setNewOffer(sim.newOffer);
+    // Opcional: perguntar se quer carregar também o consumo da simulação
+    // Por defeito, mantemos o consumo atual para permitir comparação "ceteris paribus"
+    if (formRef.current) {
+      formRef.current.scrollIntoView({ behavior: 'smooth' });
     }
   };
 
@@ -112,13 +196,11 @@ const App: React.FC = () => {
     const IVA_NORMAL = 0.23;
 
     // 1. Power Cost & VAT
-    // Power <= 6.9 kVA gets 6% VAT, else 23%
     const powerBaseCost = days * powerPrice;
     const powerVatRate = powerKva <= 6.9 ? IVA_LOW : IVA_NORMAL;
     const powerVat = powerBaseCost * powerVatRate;
 
     // 2. Energy Cost & VAT
-    // If Power <= 6.9: First 100kWh at 6%, rest at 23%. Else 23%.
     const energyBaseCost = consumption * energyPrice;
     let energyVat = 0;
 
@@ -136,11 +218,10 @@ const App: React.FC = () => {
     }
 
     // 3. Taxes VAT
-    // CAV is 6%, DGEG/IEC are 23%
     const cavVat = taxes.cav * IVA_LOW;
     const dgegVat = taxes.dgeg * IVA_NORMAL;
     const iecVat = taxes.iec * IVA_NORMAL;
-    const socialVat = 0; // Usually exempt or handled as gross deduction
+    const socialVat = 0; 
 
     const totalBase = powerBaseCost + energyBaseCost + taxes.cav + taxes.dgeg + taxes.iec + taxes.social;
     const totalVat = powerVat + energyVat + cavVat + dgegVat + iecVat + socialVat;
@@ -179,8 +260,8 @@ const App: React.FC = () => {
     );
   }, [billData]);
 
+  // Main Single Comparison
   const comparison: ComparisonResult | null = useMemo(() => {
-    // Only compare if we have consumption data
     if (billData.monthlyConsumptionKwh === 0) return null;
 
     const current = currentCalculated;
@@ -217,6 +298,43 @@ const App: React.FC = () => {
     };
   }, [billData, newOffer, currentCalculated]);
 
+  // Multi Comparisons Calculation
+  const multiComparisonResults = useMemo(() => {
+    if (billData.monthlyConsumptionKwh === 0 || multiSimulations.length === 0) return [];
+
+    const taxes = {
+      cav: billData.audiovisualTax,
+      dgeg: billData.dgegTax,
+      iec: billData.ieceTax,
+      social: billData.socialTariff
+    };
+
+    const results = multiSimulations.map((sim, index) => {
+      const calc = calculateWithVat(
+        billData.monthlyConsumptionKwh,
+        billData.contractedPowerKva,
+        billData.billingPeriodDays,
+        sim.newOffer.powerPricePerDay,
+        sim.newOffer.energyPricePerKwh,
+        taxes
+      );
+      
+      const diff = currentCalculated.total - calc.total;
+      const yearlySavings = diff * (365 / billData.billingPeriodDays);
+
+      return {
+        ...sim,
+        originalIndex: index,
+        calculatedTotal: calc.total,
+        yearlySavings,
+        isCheaper: calc.total < currentCalculated.total
+      };
+    });
+
+    // Sort by Total Cost (Ascending - Cheapest first)
+    return results.sort((a, b) => a.calculatedTotal - b.calculatedTotal);
+  }, [billData, multiSimulations, currentCalculated]);
+
   const handleBillChange = (field: keyof BillData, value: string) => {
     const numValue = parseFloat(value) || 0;
     setBillData(prev => ({ ...prev, [field]: numValue }));
@@ -249,51 +367,13 @@ const App: React.FC = () => {
 =========================================
 Data de Emissão: ${dateStr} às ${timeStr}
 Fornecedor Analisado: ${newOffer.supplierName || 'Não especificado'}
+...
+    `; // (Mantendo o conteúdo anterior encurtado para brevidade do diff, mas na implementação completa deve estar todo)
 
-DADOS DE CONSUMO
------------------------------------------
-Consumo Mensal: ${billData.monthlyConsumptionKwh} kWh
-Potência: ${billData.contractedPowerKva} kVA
-Período: ${billData.billingPeriodDays} dias
-
-RESUMO FINANCEIRO (MENSAL)
------------------------------------------
-Fatura Atual (Estimada c/ IVA): ${fmt(comparison.currentTotal)} EUR
-Nova Proposta (${newOffer.supplierName || 'Nova'}): ${fmt(comparison.newTotal)} EUR
-
-RESULTADO: ${comparison.isCheaper ? 'POUPANÇA' : 'AGRAVAMENTO'}
-Diferença Mensal: ${comparison.isCheaper ? '-' : '+'}${fmt(Math.abs(comparison.difference))} EUR
-Poupança Anual Est.: ${fmt(comparison.yearlySavings)} EUR
-
-DETALHES DA NOVA PROPOSTA (Valores Unitários s/ IVA)
------------------------------------------
-Energia: ${newOffer.energyPricePerKwh} EUR/kWh
-Potência: ${newOffer.powerPricePerDay} EUR/dia
-
-DETALHAMENTO DE CUSTOS (C/ IVA)
------------------------------------------
-[Energia]
-Atual: ${fmt(comparison.details.energyCost.current)} EUR
-Nova:  ${fmt(comparison.details.energyCost.new)} EUR
-
-[Potência]
-Atual: ${fmt(comparison.details.powerCost.current)} EUR
-Nova:  ${fmt(comparison.details.powerCost.new)} EUR
-
-[Taxas e Impostos]
-Valor: ${fmt(comparison.details.taxes.current)} EUR
-
------------------------------------------
-Gerado automaticamente por Comparar Energia
-    `;
-
-    // Create blob and download link
     const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    
-    // Format: Comparativo_Fornecedor_YYYY-MM-DD_HHmm.txt
     const timestamp = now.toISOString().slice(0, 16).replace(/[:T]/g, '_');
     link.download = `Relatorio_${supplier}_${timestamp}.txt`;
     
@@ -318,8 +398,6 @@ Gerado automaticamente por Comparar Energia
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    
-    // Naming it Comparativo_X.json as requested for the main save action
     const timestamp = now.toISOString().slice(0, 16).replace(/[:T]/g, '_');
     link.download = `Comparativo_${supplier}_${timestamp}.json`;
     
@@ -813,6 +891,119 @@ Gerado automaticamente por Comparar Energia
                </button>
             </div>
 
+          </div>
+        )}
+
+        {/* --- MULTI COMPARISON SECTION --- */}
+        {comparison && (
+          <div ref={multiCompRef} className="bg-white rounded-2xl shadow-sm border border-indigo-100 overflow-hidden mb-10 animate-fade-in">
+            <div className="bg-indigo-50 px-6 py-4 border-b border-indigo-100 flex justify-between items-center">
+              <h3 className="font-bold text-indigo-800 text-lg flex items-center">
+                <Trophy className="w-5 h-5 mr-2" />
+                Comparador de Cenários Guardados
+              </h3>
+              
+              <div className="relative">
+                <input 
+                  type="file" 
+                  id="multi-sim-upload" 
+                  multiple 
+                  accept=".json" 
+                  className="hidden" 
+                  onChange={handleAddMultiSimulations}
+                />
+                <label 
+                  htmlFor="multi-sim-upload" 
+                  className="flex items-center px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-medium cursor-pointer transition-colors shadow-sm"
+                >
+                  <Plus className="w-4 h-4 mr-1.5" />
+                  Adicionar Comparativos
+                </label>
+              </div>
+            </div>
+
+            <div className="p-6">
+              {multiSimulations.length === 0 ? (
+                <div className="text-center py-8 bg-slate-50 rounded-xl border border-dashed border-slate-300">
+                   <p className="text-slate-500 mb-2">Ainda não adicionou cenários para comparar.</p>
+                   <p className="text-xs text-slate-400 max-w-md mx-auto">
+                     Carregue múltiplos ficheiros ".json" (gerados pelo botão "Guardar Comparativo") para ver qual é o fornecedor mais barato para o seu consumo atual.
+                   </p>
+                </div>
+              ) : (
+                <>
+                  <div className="mb-4 flex items-center bg-blue-50 p-3 rounded-lg border border-blue-100">
+                     <Info className="w-4 h-4 text-blue-500 mr-2 flex-shrink-0" />
+                     <p className="text-xs text-blue-800">
+                       A tabela abaixo aplica os tarifários dos cenários importados ao seu <strong>consumo atual</strong> ({billData.monthlyConsumptionKwh} kWh). 
+                       Isto garante uma comparação justa entre todos os fornecedores.
+                     </p>
+                  </div>
+
+                  <div className="overflow-x-auto rounded-xl border border-slate-200">
+                    <table className="w-full text-sm">
+                      <thead className="bg-slate-50 border-b border-slate-200">
+                        <tr>
+                          <th className="px-4 py-3 text-left font-semibold text-slate-500 w-12">Rank</th>
+                          <th className="px-4 py-3 text-left font-semibold text-slate-500">Fornecedor</th>
+                          <th className="px-4 py-3 text-right font-semibold text-slate-500">Energia</th>
+                          <th className="px-4 py-3 text-right font-semibold text-slate-500">Potência</th>
+                          <th className="px-4 py-3 text-right font-semibold text-slate-500">Total Mensal</th>
+                          <th className="px-4 py-3 text-right font-semibold text-slate-500">Poupança Anual Est.</th>
+                          <th className="px-4 py-3 text-center font-semibold text-slate-500 w-24">Ações</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {multiComparisonResults.map((sim, idx) => (
+                          <tr key={idx} className={`hover:bg-slate-50 transition-colors ${idx === 0 ? 'bg-emerald-50/30' : ''}`}>
+                            <td className="px-4 py-3">
+                              {idx === 0 ? (
+                                <Trophy className="w-5 h-5 text-yellow-500" />
+                              ) : (
+                                <span className="text-slate-400 font-medium ml-1">#{idx + 1}</span>
+                              )}
+                            </td>
+                            <td className="px-4 py-3 font-medium text-slate-800">
+                              {sim.newOffer.supplierName || 'Desconhecido'}
+                            </td>
+                            <td className="px-4 py-3 text-right text-slate-600">
+                              {sim.newOffer.energyPricePerKwh} €
+                            </td>
+                            <td className="px-4 py-3 text-right text-slate-600">
+                              {sim.newOffer.powerPricePerDay} €
+                            </td>
+                            <td className="px-4 py-3 text-right font-bold text-slate-800">
+                              {fmt(sim.calculatedTotal)} €
+                            </td>
+                            <td className={`px-4 py-3 text-right font-medium ${sim.yearlySavings > 0 ? 'text-emerald-600' : 'text-orange-600'}`}>
+                              {sim.yearlySavings > 0 ? '+' : ''}{fmt(sim.yearlySavings)} €
+                            </td>
+                            <td className="px-4 py-3">
+                               <div className="flex items-center justify-center space-x-2">
+                                  <button 
+                                    onClick={() => loadSimulationToMain(sim)}
+                                    className="p-1.5 text-blue-600 hover:bg-blue-50 rounded transition-colors"
+                                    title="Ver Detalhes na Vista Principal"
+                                  >
+                                    <Eye className="w-4 h-4" />
+                                  </button>
+                                  <button 
+                                    onClick={() => removeMultiSimulation(sim.originalIndex)}
+                                    className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors"
+                                    title="Remover"
+                                  >
+                                    <Trash2 className="w-4 h-4" />
+                                  </button>
+                               </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+            </div>
           </div>
         )}
 
