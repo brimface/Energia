@@ -2,7 +2,7 @@ import React, { useState, useMemo, useRef } from 'react';
 import { FileUpload } from './components/FileUpload';
 import { extractBillData } from './services/geminiService';
 import { BillData, NewOfferData, AnalysisStatus, ComparisonResult, SavedSimulation } from './types';
-import { Zap, Activity, FileText, AlertTriangle, ArrowRight, TrendingDown, TrendingUp, Info, Calculator, Edit3, ChevronDown, ChevronUp, Scale, Download, Store, Save, RotateCcw } from 'lucide-react';
+import { Zap, Activity, FileText, AlertTriangle, ArrowRight, TrendingDown, TrendingUp, Info, Calculator, Edit3, ChevronDown, ChevronUp, Scale, Store, Save, RotateCcw } from 'lucide-react';
 
 // Funções para gerar estado inicial limpo (Factory Pattern)
 // Usar funções garante que recebemos sempre um novo objeto, evitando referências partilhadas/mutadas
@@ -118,7 +118,7 @@ const App: React.FC = () => {
     const powerVat = powerBaseCost * powerVatRate;
 
     // 2. Energy Cost & VAT
-    // If Power <= 6.9: First 100kWh at 6%, rest at 23%. Else all 23%.
+    // If Power <= 6.9: First 100kWh at 6%, rest at 23%. Else 23%.
     const energyBaseCost = consumption * energyPrice;
     let energyVat = 0;
 

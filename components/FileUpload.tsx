@@ -1,5 +1,5 @@
 import React, { useCallback, useState } from 'react';
-import { Upload, FileText, CheckCircle, AlertCircle, FileJson, X } from 'lucide-react';
+import { Upload, CheckCircle, AlertCircle, FileJson, X } from 'lucide-react';
 
 interface FileUploadProps {
   onFileSelect: (base64: string, mimeType: string) => void;
